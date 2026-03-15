@@ -1,0 +1,28 @@
+name: Update Google Drive
+
+on:
+  workflow_dispatch: # 수동 실행 버튼 생성
+  schedule:
+    - cron: '0 0 * * *' # 매일 한국 시간 오전 9시 자동 실행
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas requests beautifulsoup4
+
+      - name: Run script
+        env:
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: python main.py
