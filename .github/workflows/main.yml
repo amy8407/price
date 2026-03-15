@@ -1,13 +1,15 @@
-name: Update Google Drive
+name: 축산 가격 수집 (돼지 + 한우)
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *'
+    - cron: '0 23 * * *'  # 매일 오전 8시(KST)
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -15,17 +17,25 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas requests beautifulsoup4 playwright openpyxl
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib google-auth pandas numpy requests beautifulsoup4 playwright openpyxl xlsxwriter
 
       - name: Install Playwright Browsers
-        run: playwright install --with-deps
+        run: playwright install --with-deps firefox
 
-      - name: Run script
+      - name: 돼지 가격 수집
         env:
+          EKAPE_API_KEY: ${{ secrets.EKAPE_API_KEY }}
           GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: python pork.py
+
+      - name: 한우 가격 수집 + 마진 계산
+        env:
+          EKAPE_API_KEY: ${{ secrets.EKAPE_API_KEY }}
+          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+        run: python beef_all.py
