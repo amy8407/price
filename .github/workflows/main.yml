@@ -1,19 +1,19 @@
 name: Update Google Drive
 
 on:
-  workflow_dispatch: # 수동 실행 버튼 생성
+  workflow_dispatch:
   schedule:
-    - cron: '0 0 * * *' # 매일 한국 시간 오전 9시 자동 실행
+    - cron: '0 0 * * *'
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4 # 최신 버전으로 교체
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # 최신 버전으로 교체
         with:
           python-version: '3.9'
 
