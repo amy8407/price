@@ -1,122 +1,83 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-한우 가격 수집 + 마진 계산 통합 실행 스크립트
-
-실행 순서:
-  1단계: beef_selector_clean.py - 금천미트 시장가 + 경락가 수집 -> beef_price_*.xlsx 생성
-  2단계: marginb_compare.py     - 위 파일을 읽어 적수원가/마진 계산 -> 결과 파일 생성
-"""
-
-import sys
-import os
-
-# 더블클릭 실행 시 cmd 창에서 UTF-8로 재실행 (한글 출력 보장)
-if __name__ == "__main__" and not os.environ.get('RUN_BEEF_MARGIN'):
-    os.environ['RUN_BEEF_MARGIN'] = '1'
-    os.system(f'cmd /k "chcp 65001 > nul && python "{__file__}""')
-    sys.exit()
-
-import subprocess
-import glob
-from datetime import datetime
+# ==============================================
+# beef_all.py 수정 가이드 (3곳)
+# ==============================================
 
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# ── 변경 1: 파일 맨 위 import 영역에 추가 ──
+
+import json                                          # 추가
+from google.oauth2 import service_account            # 추가
+from googleapiclient.discovery import build          # 추가
+from googleapiclient.http import MediaFileUpload     # 추가
 
 
-def run_script(script_name, extra_env=None):
-    """스크립트를 서브프로세스로 실행하고 실시간으로 출력을 보여줌."""
-    script_path = os.path.join(SCRIPT_DIR, script_name)
-    if not os.path.exists(script_path):
-        print(f"[오류] 파일을 찾을 수 없습니다: {script_path}")
-        return False
+# ── 변경 2: main() 위에 업로드 함수 추가 ──
 
-    env = os.environ.copy()
-    if extra_env:
-        env.update(extra_env)
+def upload_to_google_drive(file_path):
+    """생성된 파일을 구글 드라이브에 업로드"""
+    try:
+        creds_json = os.environ.get('GDRIVE_CREDENTIALS')
+        folder_id = os.environ.get('GDRIVE_FOLDER_ID')
 
-    proc = subprocess.Popen(
-        [sys.executable, script_path],
-        env=env,
-        cwd=SCRIPT_DIR,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding='utf-8',
-        errors='replace',
-        bufsize=1,
-    )
+        if not creds_json or not folder_id:
+            print(f"[업로드 건너뜀] 환경변수 없음: {file_path}")
+            return
 
-    for line in proc.stdout:
-        print(line, end='', flush=True)
+        info = json.loads(creds_json)
+        creds = service_account.Credentials.from_service_account_info(info)
+        service = build('drive', 'v3', credentials=creds)
 
-    proc.wait()
-    return proc.returncode == 0
+        file_metadata = {
+            'name': os.path.basename(file_path),
+            'parents': [folder_id]
+        }
+        media = MediaFileUpload(file_path, resumable=True)
 
-
-def find_latest_beef_price_file():
-    """가장 최근에 생성된 beef_price_*.xlsx 파일 경로 반환."""
-    pattern = os.path.join(SCRIPT_DIR, 'beef_price_*.xlsx')
-    files = glob.glob(pattern)
-    if not files:
-        return None
-    return max(files, key=os.path.getmtime)
+        result = service.files().create(
+            body=file_metadata, media_body=media, fields='id'
+        ).execute()
+        print(f"업로드 완료: {os.path.basename(file_path)} (ID: {result.get('id')})")
+    except Exception as e:
+        print(f"업로드 실패: {file_path} - {e}")
 
 
-def main():
-    print("=" * 60)
-    print("  한우 가격 수집 + 마진 계산 통합 실행")
-    print(f"  시작: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
+# ── 변경 3: main() 함수 끝부분에 업로드 호출 추가 ──
+# 기존:
+#     print(f"\n=== 모든 작업 완료 ===")
+#     print(f"가격 데이터: {price_filename}")
+#     print(f"HTML: {html_file}")
+#     print(f"Excel (비교): {excel_file}")
+#     print(f"Excel (All Data): {all_data_file}")
+#
+# 변경 후:
+#     print(f"\n=== 모든 작업 완료 ===")
+#     # 구글 드라이브 업로드 (4개 파일)
+#     for f in [price_filename, html_file, excel_file, all_data_file]:
+#         if f:
+#             upload_to_google_drive(f)
+#
+#     print(f"가격 데이터: {price_filename}")
+#     print(f"HTML: {html_file}")
+#     print(f"Excel (비교): {excel_file}")
+#     print(f"Excel (All Data): {all_data_file}")
 
-    os.chdir(SCRIPT_DIR)
 
-    # ── 1단계: 가격 데이터 수집 ──────────────────────────────
-    print("\n[1단계] beef_selector_clean.py - 가격 데이터 수집")
-    print("-" * 60)
-
-    files_before = set(glob.glob(os.path.join(SCRIPT_DIR, 'beef_price_*.xlsx')))
-
-    success1 = run_script('beef_selector_clean.py')
-
-    if not success1:
-        print("\n[오류] 1단계(가격 수집)가 실패했습니다. 프로그램을 종료합니다.")
-        input("\n엔터를 누르면 종료됩니다...")
-        sys.exit(1)
-
-    # 새로 생성된 파일 확인
-    files_after = set(glob.glob(os.path.join(SCRIPT_DIR, 'beef_price_*.xlsx')))
-    new_files = files_after - files_before
-    if new_files:
-        new_file = list(new_files)[0]
-        print(f"\n[완료] 가격 파일 생성: {os.path.basename(new_file)}")
-    else:
-        latest = find_latest_beef_price_file()
-        if latest:
-            print(f"\n[확인] 기존 가격 파일 사용: {os.path.basename(latest)}")
-        else:
-            print("\n[오류] beef_price_*.xlsx 파일이 없습니다. 프로그램을 종료합니다.")
-            input("\n엔터를 누르면 종료됩니다...")
-            sys.exit(1)
-
-    # ── 2단계: 마진 계산 ────────────────────────────────────
-    print("\n[2단계] marginb_compare.py - 적수원가/마진 계산")
-    print("-" * 60)
-
-    # MARGINB_RUNNING=1 : marginb_compare.py의 더블클릭 재실행 가드를 우회
-    success2 = run_script('marginb_compare.py', extra_env={'MARGINB_RUNNING': '1'})
-
-    print("\n" + "=" * 60)
-    if success2:
-        print("  모든 작업이 완료되었습니다!")
-    else:
-        print("  [경고] 2단계(마진 계산)에서 오류가 발생했습니다.")
-    print(f"  완료: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print("=" * 60)
-
-    input("\n엔터를 누르면 종료됩니다...")
-
+# ── 변경 4 (치명적): 파일 맨 아래 Windows 실행부 교체 ──
+#
+# [삭제] 이 블록 전체 삭제:
+#   if __name__ == "__main__" and not os.environ.get('BEEF_ALL_RUNNING'):
+#       os.environ['BEEF_ALL_RUNNING'] = '1'
+#       os.system(f'cmd /k "chcp 65001 > nul && python "{__file__}""')
+#       sys.exit()
+#
+# [교체] 아래 코드로 대체:
 
 if __name__ == "__main__":
-    main()
+    # Windows 로컬 실행시 한글 깨짐 방지
+    if os.name == 'nt' and not os.environ.get('BEEF_ALL_RUNNING'):
+        os.environ['BEEF_ALL_RUNNING'] = '1'
+        os.system(f'cmd /k "chcp 65001 > nul && python "{__file__}""')
+        sys.exit()
+    else:
+        # GitHub Actions(Linux) 또는 이미 재실행된 Windows
+        asyncio.run(main())
