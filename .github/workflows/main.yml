@@ -3,7 +3,7 @@ name: 축산 가격 수집 (돼지 + 한우)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 23 * * *'  # 매일 오전 8시(KST)
+    - cron: '0 23 * * *'
 
 jobs:
   build:
@@ -29,13 +29,13 @@ jobs:
       - name: 돼지 가격 수집
         env:
           EKAPE_API_KEY: ${{ secrets.EKAPE_API_KEY }}
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: python pork.py
 
       - name: 한우 가격 수집 + 마진 계산
         env:
           EKAPE_API_KEY: ${{ secrets.EKAPE_API_KEY }}
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: python beef_all.py
