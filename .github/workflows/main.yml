@@ -19,7 +19,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas requests beautifulsoup4 playwright
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas requests beautifulsoup4 playwright openpyxl
 
       - name: Install Playwright Browsers
         run: playwright install --with-deps
