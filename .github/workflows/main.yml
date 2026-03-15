@@ -10,16 +10,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4 # 최신 버전으로 교체
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v5 # 최신 버전으로 교체
+        uses: actions/setup-python@v5
         with:
           python-version: '3.9'
 
       - name: Install dependencies
         run: |
-          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas requests beautifulsoup4
+          pip install google-api-python-client google-auth-httplib2 google-auth-oauthlib pandas requests beautifulsoup4 playwright
+
+      - name: Install Playwright Browsers
+        run: playwright install --with-deps
 
       - name: Run script
         env:
