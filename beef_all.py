@@ -1105,30 +1105,41 @@ class MarginCalculatorCompare:
 # ============================================================
 
 def upload_to_google_drive(file_path):
-    """생성된 파일을 구글 드라이브에 업로드"""
+    print(f"\n[업로드 시작] 대상 파일: {file_path}")
     try:
         creds_json = os.environ.get('GDRIVE_CREDENTIALS')
         folder_id = os.environ.get('GDRIVE_FOLDER_ID')
-
+        
         if not creds_json or not folder_id:
-            print(f"[업로드 건너뜀] 환경변수 없음 (로컬 실행시 정상)")
+            print("❌ 오류: GitHub Secrets 설정이 누락되었습니다.")
             return
 
         info = json.loads(creds_json)
         creds = service_account.Credentials.from_service_account_info(info)
         service = build('drive', 'v3', credentials=creds)
 
+        display_name = f"돼지가격_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        
         file_metadata = {
-            'name': os.path.basename(file_path),
+            'name': display_name,
             'parents': [folder_id]
         }
         media = MediaFileUpload(file_path, resumable=True)
-
-        print(f"구글 드라이브 업로드 중: {os.path.basename(file_path)}")
-        result = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        print(f"업로드 완료: {os.path.basename(file_path)} (ID: {result.get('id')})")
+        
+        # --- 핵심 수정: supportsAllDrives=True 추가 ---
+        file = service.files().create(
+            body=file_metadata, 
+            media_body=media, 
+            fields='id',
+            supportsAllDrives=True  # 서비스 계정이 공유 폴더의 용량을 사용하도록 허용
+        ).execute()
+        # --------------------------------------------
+        
+        print(f"✅ 구글 드라이브 업로드 성공! (파일 ID: {file.get('id')})")
+        print(f"📍 저장 위치: 사용자님의 공유 폴더(ID: {folder_id})")
+        
     except Exception as e:
-        print(f"업로드 실패: {os.path.basename(file_path)} - {e}")
+        print(f"❌ 구글 드라이브 업로드 실패: {str(e)}")
 
 
 # ============================================================
