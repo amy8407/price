@@ -984,9 +984,7 @@ async def main():
         for error in scraper.errors[-3:]:
             print(f"  [{error['timestamp']}] {error['section']}: {error['error']}")
 
-    # 프로그램 종료 전 사용자 입력 대기
-    print("\n프로그램을 종료하려면 엔터를 누르세요...")
-    input()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
