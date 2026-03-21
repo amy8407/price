@@ -911,6 +911,8 @@ class BeefCompleteScraper:
             return
 
         grade_order = ['1++', '1+', '1', '2']  # 높은 등급 → 낮은 등급 (가격도 내림차순)
+        # 뼈류는 1등급 단일 가격만 수집하므로 추정 대상에서 제외
+        bone_parts = {'사골', '꼬리', '잡뼈', '우족', '도가니', '스지'}
         corrections_log = []
 
         # 부위별 그룹화 (딕셔너리 참조 유지 - 직접 수정 가능)
@@ -918,8 +920,10 @@ class BeefCompleteScraper:
         for item in self.market_wholesale_data:
             part = item['부위']
             grade = item['등급']
+            if part in bone_parts:
+                continue  # 뼈류는 1등급만 수집하므로 건너뜀
             if grade not in grade_order:
-                continue  # 뼈류 등 대상 외 등급 건너뜀
+                continue
             if part not in parts_map:
                 parts_map[part] = {}
             parts_map[part][grade] = item
@@ -2346,12 +2350,11 @@ async def main():
 # 진입점 - Windows 더블클릭 실행 지원
 # ============================================================
 
+# 더블클릭으로 실행 시 cmd 창에서 UTF-8로 재실행
 if __name__ == "__main__":
     if os.name == 'nt' and not os.environ.get('BEEF_ALL_RUNNING'):
-        # Windows 로컬: 한글 깨짐 방지
         os.environ['BEEF_ALL_RUNNING'] = '1'
         os.system(f'cmd /k "chcp 65001 > nul && python "{__file__}""')
         sys.exit()
     else:
-        # Linux(GitHub Actions) 또는 재실행된 Windows
         asyncio.run(main())
