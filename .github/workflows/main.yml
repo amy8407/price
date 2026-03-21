@@ -3,7 +3,7 @@ name: 축산 가격 수집 (돼지 + 한우)
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 23 * * *'
+    - cron: '0 8 * * 2'  # 매주 화요일 오후 5시(KST) = 화요일 UTC 08:00
 
 jobs:
   build:
