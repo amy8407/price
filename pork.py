@@ -4,17 +4,20 @@
 돼지고기 완전판 스크래핑 프로그램 (표시자 방식 + 재시도)
 - 금천미트 부분육 시장가격 (16개 부위)
 - 축산물품질평가원 도체 경락가격 (육질/육량등급별)
+- 적수원가/마진 계산 비교 (PorkMarginCalculatorCompare)
 - Excel 파일로 통합 저장 + 구글 드라이브 업로드
 """
 
 import asyncio
 import pandas as pd
+import numpy as np
 from datetime import datetime, timedelta
 from playwright.async_api import async_playwright
 import traceback
 import os
 import requests
 import xml.etree.ElementTree as ET
+import xlsxwriter
 
 # ★ 구글 드라이브 업로드용 (OAuth 방식)
 import json
@@ -555,9 +558,608 @@ class PorkCompleteScraper:
                 print(f"  - {part}: {avg_price:,.0f}원/kg")
 
 
-# ★ 추가 2/3: 구글 드라이브 업로드 함수
+# ============================================================
+# PorkMarginCalculatorCompare 클래스 (marginp_compare.py 원본)
+# - 돼지는 소와 달리 등급 구분이 없어 단일(1등급) 그룹으로만 계산
+# ============================================================
+
+class PorkMarginCalculatorCompare:
+    def __init__(self, price_file, weight_file=None):
+        self.price_file = price_file
+        self.weight_file = weight_file or "pig.xlsx"
+        self.grades = ["1"]  # 돼지는 등급 구분 없이 단일 그룹만 사용
+        self.margins = [0.10, 0.20, 0.30, 0.40]
+
+        # 뼈류 고정가격 (원/kg) - pig.xlsx에서 확인된 값
+        self.bone_prices = {
+            "돈피": 2000,
+            "꼬리": 3000,
+            "사골": 500,
+            "A지방": 2000
+        }
+
+        # 뼈류 중량 데이터 (비육중량.txt 파일 기준)
+        self.bone_parts_weights = [
+            ['돈피', 1.5],
+            ['꼬리', 0.13],
+            ['사골', 1.5],
+            ['A지방', 1.6]
+        ]
+
+    def load_data(self):
+        """데이터 로드"""
+        print("데이터 로딩 중...")
+        try:
+            # pork.py에서 저장하는 시트명은 '돼지_통합데이터'
+            self.df_price = pd.read_excel(self.price_file, sheet_name='돼지_통합데이터')
+            print(f"가격 데이터 로드 완료: {len(self.df_price)}건")
+        except Exception as e:
+            try:
+                xl = pd.ExcelFile(self.price_file)
+                sheet_name = xl.sheet_names[0]
+                self.df_price = pd.read_excel(self.price_file, sheet_name=sheet_name)
+                print(f"가격 데이터 로드 완료 ({sheet_name}): {len(self.df_price)}건")
+            except Exception as e2:
+                print(f"가격 데이터 로드 실패: {e2}")
+                return False
+        return True
+
+    def get_auction_price(self):
+        """경락가 데이터에서 등외제외 가격 추출"""
+        try:
+            auction_rows = self.df_price[
+                (self.df_price['type'] == '도체경락가') &
+                (self.df_price['grade_detail'] == '등외제외')
+            ]
+            if not auction_rows.empty:
+                price = auction_rows['가격'].iloc[0]
+                print(f"경락가 데이터 사용: 등외제외 {price:,}원/kg")
+                return price
+            else:
+                print("등외제외 경락가 데이터를 찾을 수 없어 기본값 사용: 7,494원/kg")
+                return 7494
+        except Exception as e:
+            print(f"경락가 추출 오류: {e}, 기본값 사용: 7,494원/kg")
+            return 7494
+
+    def prepare_data(self):
+        """데이터 전처리"""
+        self.auction_price = self.get_auction_price()
+
+        if not self.df_price.empty:
+            market_data_filtered = self.df_price[self.df_price['type'] == '시장도매가'].copy()
+            if not market_data_filtered.empty:
+                self.market_data = pd.DataFrame({
+                    '부위': market_data_filtered['부위'].values,
+                    '가격': market_data_filtered['가격'].values,
+                    '등급': '1'
+                })
+                print(f"도매가 데이터 로드: {len(self.market_data)}건")
+            else:
+                self.market_data = pd.DataFrame()
+        else:
+            self.market_data = pd.DataFrame()
+
+        if not self.market_data.empty:
+            self.market_pivot = self.market_data.pivot_table(index="부위", columns="등급", values="가격", aggfunc="last")
+        else:
+            self.market_pivot = pd.DataFrame()
+
+        self.parse_pig_weights()
+
+        # 부대비용 (pig.xlsx의 고정값)
+        self.overhead_default = 19500.0
+
+        print("데이터 전처리 완료")
+        return True
+
+    def parse_pig_weights(self):
+        """돼지 부위별 중량 데이터 (비육중량.txt 기준, 등급 구분 없음)"""
+        # 냉도체중
+        self.carcass_weights = {"1": 85.0}
+
+        fixed_parts_weights = [
+            ['삼겹살', 11.08],
+            ['등심', 5.9],
+            ['목심', 4.33],
+            ['안심', 1.13],
+            ['앞다리살', 7.71],
+            ['뒷다리살', 14.92],
+            ['등갈비', 0.93],
+            ['갈비', 2.84],
+            ['가브리살', 0.42],
+            ['갈매기살', 0.26],
+            ['항정살', 0.41],
+            ['사태', 3.14],
+            ['등뼈', 3.3],
+            ['잡육', 1.82],
+            ['단족', 2.34]
+        ]
+
+        parts_data = [{'부위': p[0], '1': p[1]} for p in fixed_parts_weights]
+        self.cut_weights = pd.DataFrame(parts_data)
+
+    def get_market_price(self, part, grade="1"):
+        """부위별 도매가격 조회"""
+        if part in self.bone_prices:
+            return float(self.bone_prices[part])
+
+        # 부위명 매핑 (marginp.py 부위명 -> pork.py 수집 부위명)
+        part_mapping = {
+            '삼겹살': '미박삼겹',
+            '등심': '등심',
+            '목심': '목심',
+            '안심': '안심',
+            '앞다리살': '미박앞다리',
+            '뒷다리살': '미박뒷다리',
+            '등갈비': '등갈비',
+            '갈비': '갈비',
+            '가브리살': '등심덧살',
+            '갈매기살': '갈매기',
+            '항정살': '항정',
+            '사태': '사태',
+            '등뼈': '냉동등뼈',
+            '잡육': '냉동잡육A',
+            '단족': '장족'
+        }
+
+        default_prices = {
+            '가브리살': 15000, '앞다리살': 12000, '미사태': 13000, '항정살': 20000,
+            '뒷다리살': 11000, '삼겹살': 18000, '등갈비': 16000, '갈매기살': 25000,
+            '갈비': 14000, '등뼈': 8000, '잡육': 10000
+        }
+
+        market_part = part_mapping.get(part, part)
+
+        if not self.market_pivot.empty and market_part in self.market_pivot.index:
+            if grade in self.market_pivot.columns:
+                val = self.market_pivot.loc[market_part, grade]
+                if pd.notna(val):
+                    return float(val)
+            for fallback_grade in ["1"]:
+                if fallback_grade in self.market_pivot.columns:
+                    val = self.market_pivot.loc[market_part, fallback_grade]
+                    if pd.notna(val):
+                        return float(val)
+
+        if part in default_prices:
+            return float(default_prices[part])
+
+        if part == '사태':
+            print(f"    사태 부위 가격 없음, 등심 가격으로 대체")
+            return self.get_market_price('등심', grade)
+
+        return np.nan
+
+    def compute_compare_table(self, grade="1"):
+        """적수원가/마진 비교 계산 (경락가 기반 + 금천10% 할증)"""
+        auction_price = self.auction_price
+        carcass_weight = self.carcass_weights[grade]
+        total_cost = carcass_weight * auction_price + self.overhead_default
+
+        parts_data = []
+
+        if grade in self.cut_weights.columns:
+            for _, row in self.cut_weights.iterrows():
+                try:
+                    weight = float(row[grade])
+                    if weight > 0:
+                        parts_data.append({"부위": row["부위"], "중량(kg)": weight})
+                except:
+                    continue
+
+        for bone_data in self.bone_parts_weights:
+            bone_name, bone_weight = bone_data[0], bone_data[1]
+            bone_price = self.bone_prices[bone_name]
+            bone_value = bone_weight * bone_price
+            parts_data.append({
+                "부위": bone_name, "중량(kg)": bone_weight,
+                "시장가격(원/kg)": bone_price, "시장가치(원)": bone_value
+            })
+
+        if not parts_data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(parts_data)
+
+        bone_part_names = [b[0] for b in self.bone_parts_weights]
+        mask_no_price = ~df["부위"].isin(bone_part_names)
+        if mask_no_price.any():
+            df.loc[mask_no_price, "시장가격(원/kg)"] = df.loc[mask_no_price, "부위"].apply(lambda x: self.get_market_price(x, grade))
+
+        df = df.dropna(subset=["시장가격(원/kg)"]).reset_index(drop=True)
+        if df.empty:
+            return pd.DataFrame()
+
+        mask_no_value = ~df["부위"].isin(bone_part_names)
+        if mask_no_value.any():
+            df.loc[mask_no_value, "시장가치(원)"] = df.loc[mask_no_value, "중량(kg)"] * df.loc[mask_no_value, "시장가격(원/kg)"]
+
+        virtual_total = df["시장가치(원)"].sum()
+
+        # === 경락가 기반 방식 (원가 그대로) ===
+        df["적수비"] = df["시장가치(원)"] / virtual_total if virtual_total > 0 else 0.0
+        df["적수합계(원)"] = total_cost * df["적수비"]
+        df["경락가_적수원가(원/kg)"] = df["적수합계(원)"] / df["중량(kg)"]
+        df["경락가_현재마진율(%)"] = np.round(((df["시장가격(원/kg)"] - df["경락가_적수원가(원/kg)"]) / df["경락가_적수원가(원/kg)"]) * 100, 1)
+        for margin in self.margins:
+            df[f"경락가_{int(margin*100)}%마진"] = np.round(df["경락가_적수원가(원/kg)"] * (1 + margin), 0).astype(int)
+
+        # === 금천미트 10% 할증 방식 (시장가격을 10% 마진으로 가정하고 역산) ===
+        df["금천10%_시장가격(원/kg)"] = df["시장가격(원/kg)"]
+        df["금천10%_적수원가(원/kg)"] = df["금천10%_시장가격(원/kg)"] / 1.10
+        df["금천10%_현재마진율(%)"] = 10.0
+        for margin in self.margins:
+            margin_price = df["금천10%_적수원가(원/kg)"] * (1 + margin)
+            df[f"금천10%_{int(margin*100)}%마진"] = np.round(margin_price, 0).astype(int)
+
+        df["적수원가_차이(원/kg)"] = df["경락가_적수원가(원/kg)"] - df["금천10%_적수원가(원/kg)"]
+        df["적수원가_차이율(%)"] = np.round(((df["경락가_적수원가(원/kg)"] - df["금천10%_적수원가(원/kg)"]) / df["금천10%_적수원가(원/kg)"]) * 100, 1)
+
+        df["등급"] = grade
+        df["경락가(원/kg)"] = auction_price
+        df["냉도체중(kg)"] = carcass_weight
+        df["부대비용(원)"] = self.overhead_default
+        df["총원가(원)"] = int(round(total_cost))
+
+        cols = (["등급", "부위", "중량(kg)", "시장가격(원/kg)",
+                "경락가_적수원가(원/kg)", "경락가_현재마진율(%)", "경락가_10%마진", "경락가_20%마진", "경락가_30%마진", "경락가_40%마진",
+                "금천10%_적수원가(원/kg)", "금천10%_현재마진율(%)", "금천10%_10%마진", "금천10%_20%마진", "금천10%_30%마진", "금천10%_40%마진",
+                "적수원가_차이(원/kg)", "적수원가_차이율(%)",
+                "시장가치(원)", "적수비", "적수합계(원)", "경락가(원/kg)", "냉도체중(kg)", "부대비용(원)", "총원가(원)"])
+
+        return df[cols]
+
+    def generate_results(self):
+        """단일 그룹에 대해 계산 실행 (돼지는 등급 구분 없음)"""
+        print("적수원가/마진 비교 계산 중...")
+        self.results = {}
+        for grade in self.grades:
+            result = self.compute_compare_table(grade)
+            if not result.empty:
+                self.results[grade] = result
+                print(f"{grade} 등급: {len(result)}개 부위 계산 완료")
+            else:
+                print(f"{grade} 등급: 계산 실패")
+        return len(self.results) > 0
+
+    def export_html(self, filename=None):
+        """HTML 결과 생성"""
+        if filename is None:
+            filename = f"pork_margin_pivot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+
+        sections = []
+        grade_titles = {"1": "돼지 (등급 구분 없음)"}
+
+        for grade, df in self.results.items():
+            if df.empty:
+                continue
+
+            virtual_total = df["시장가치(원)"].sum()
+            total_cost = df["총원가(원)"].iloc[0]
+            total_weight = df["중량(kg)"].sum()
+
+            header = f"""
+            <div class='card'>
+                <div class='card-header' style='background:#2980B9;color:white;padding:14px 20px;'>
+                    <span style='font-size:18px;font-weight:700'>{grade_titles[grade]} - 적수원가 계산 방식 비교</span>
+                    <span style='margin-left:10px;background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:12px;'>
+                        경락가 {df['경락가(원/kg)'].iloc[0]:,}원/kg
+                    </span>
+                    <span style='margin-left:8px;background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:12px;'>
+                        냉도체중 {df['냉도체중(kg)'].iloc[0]:,.2f}kg
+                    </span>
+                    <br><div style='margin-top:8px'>
+                    <span style='background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:12px;margin-right:8px'>
+                        시장가치총액 {virtual_total:,}원
+                    </span>
+                    <span style='background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:12px;margin-right:8px'>
+                        총원가 {total_cost:,}원
+                    </span>
+                    <span style='background:rgba(255,255,255,0.2);padding:2px 8px;border-radius:12px;'>
+                        부위합계 {total_weight:.2f}kg
+                    </span>
+                    </div>
+                </div>
+            """
+
+            table_html = "<div style='overflow:auto'><table style='width:100%;border-collapse:collapse;font-size:12px'>"
+            table_html += """
+            <thead>
+                <tr style='background:#fbfcfe'>
+                    <th rowspan="2" style='padding:8px;border:1px solid #eee;text-align:center'>부위</th>
+                    <th rowspan="2" style='padding:8px;border:1px solid #eee;text-align:center'>중량(kg)</th>
+                    <th rowspan="2" style='padding:8px;border:1px solid #eee;text-align:center'>시장가격<br/>(원/kg)</th>
+                    <th colspan="6" style='padding:8px;border:1px solid #eee;text-align:center;background:#ffeaa7'>경락가 기반 (원가 그대로)</th>
+                    <th colspan="5" style='padding:8px;border:1px solid #eee;text-align:center;background:#a8e6cf'>금천미트 10% 할증</th>
+                    <th colspan="2" style='padding:8px;border:1px solid #eee;text-align:center;background:#ffb3ba'>차이 분석</th>
+                </tr>
+                <tr style='background:#fbfcfe'>
+                    <th style='padding:6px;border:1px solid #eee;background:#ffeaa7'>적수원가</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#ffeaa7'>현재마진율</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#ffeaa7'>10%마진</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#ffeaa7'>20%마진</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#ffeaa7'>30%마진</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#ffeaa7'>40%마진</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#a8e6cf'>적수원가</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#a8e6cf'>10%마진</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#a8e6cf'>20%마진</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#a8e6cf'>30%마진</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#a8e6cf'>40%마진</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#ffb3ba'>원가차이</th>
+                    <th style='padding:6px;border:1px solid #eee;background:#ffb3ba'>차이율(%)</th>
+                </tr>
+            </thead><tbody>
+            """
+
+            for _, row in df.iterrows():
+                diff_color = '#ffe6e6' if row['적수원가_차이(원/kg)'] > 0 else '#e6ffe6'
+                table_html += f"""
+                <tr>
+                    <td style='padding:6px;border:1px solid #eee'>{row['부위']}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right'>{row['중량(kg)']:,.2f}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;font-weight:bold'>{int(row['시장가격(원/kg)']):,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#ffeaa7'>{int(row['경락가_적수원가(원/kg)']):,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#ffeaa7'>{row['경락가_현재마진율(%)']:.1f}%</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#ffeaa7'>{row['경락가_10%마진']:,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#ffeaa7'>{row['경락가_20%마진']:,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#ffeaa7'>{row['경락가_30%마진']:,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#ffeaa7'>{row['경락가_40%마진']:,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#a8e6cf'>{int(row['금천10%_적수원가(원/kg)']):,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#a8e6cf'>{row['금천10%_10%마진']:,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#a8e6cf'>{row['금천10%_20%마진']:,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#a8e6cf'>{row['금천10%_30%마진']:,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:#a8e6cf'>{row['금천10%_40%마진']:,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:{diff_color};font-weight:bold'>{int(row['적수원가_차이(원/kg)']):,}</td>
+                    <td style='padding:6px;border:1px solid #eee;text-align:right;background:{diff_color};font-weight:bold'>{row['적수원가_차이율(%)']:+.1f}%</td>
+                </tr>
+                """
+
+            table_html += "</tbody></table></div></div>"
+            sections.append(header + table_html)
+
+        css = """
+        body{font-family:'Malgun Gothic',system-ui,sans-serif;margin:20px;background:#f5f7fb}
+        .card{background:white;margin:20px 0;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.1);overflow:hidden}
+        """
+
+        html_content = f"""
+        <!DOCTYPE html>
+        <html lang="ko">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>돼지 적수원가 계산 방식 비교</title>
+            <style>{css}</style>
+        </head>
+        <body>
+            <h1>돼지 적수원가 계산 방식 비교</h1>
+            <div style='background:#e8f4f8;padding:15px;border-radius:8px;margin:20px 0'>
+                <h3 style='margin-top:0;color:#2c3e50'>📊 계산 방식 설명</h3>
+                <div style='display:flex;gap:20px'>
+                    <div style='flex:1;background:#ffeaa7;padding:10px;border-radius:5px'>
+                        <strong>🔸 경락가 기반 (원가 그대로)</strong><br/>
+                        경매가 × 냉도체중 + 부대비용 = 총원가<br/>
+                        적수비 적용 → 적수원가 계산
+                    </div>
+                    <div style='flex:1;background:#a8e6cf;padding:10px;border-radius:5px'>
+                        <strong>🔸 금천미트 10% 할증</strong><br/>
+                        시장가격을 10% 마진으로 가정<br/>
+                        적수원가 = 시장가격 ÷ 1.10
+                    </div>
+                </div>
+            </div>
+            <p style='color:#666'>생성시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</p>
+            {''.join(sections)}
+        </body>
+        </html>
+        """
+
+        with open(filename, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+
+        print(f"HTML 결과 저장: {filename}")
+        return filename
+
+    def export_excel(self, filename=None):
+        """Excel 결과 생성 (등급별 시트 + All_Data 시트, 돼지는 단일 그룹만 존재)"""
+        if filename is None:
+            filename = f"pork_margin_pivot_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        wb = xlsxwriter.Workbook(filename)
+
+        fmt_header = wb.add_format({'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#fbfcfe'})
+        fmt_text = wb.add_format({'border': 1})
+        fmt_number = wb.add_format({'border': 1, 'num_format': '#,##0'})
+        fmt_decimal = wb.add_format({'border': 1, 'num_format': '#,##0.00'})
+        fmt_percent = wb.add_format({'border': 1, 'num_format': '0.0'})
+        fmt_original = wb.add_format({'border': 1, 'num_format': '#,##0', 'bg_color': '#ffeaa7'})
+        fmt_new = wb.add_format({'border': 1, 'num_format': '#,##0', 'bg_color': '#a8e6cf'})
+        fmt_diff_pos = wb.add_format({'border': 1, 'num_format': '#,##0', 'bg_color': '#ffe6e6', 'bold': True})
+        fmt_diff_neg = wb.add_format({'border': 1, 'num_format': '#,##0', 'bg_color': '#e6ffe6', 'bold': True})
+
+        grade_titles = {"1": "돼지 (등급 구분 없음)"}
+        all_data_rows = []
+
+        for grade, df in self.results.items():
+            if df.empty:
+                continue
+
+            ws = wb.add_worksheet(grade)
+
+            header_format = wb.add_format({
+                'bold': True, 'font_color': 'white', 'bg_color': '#2980B9',
+                'align': 'left', 'font_size': 12, 'border': 1
+            })
+            ws.merge_range(0, 0, 0, 15, f"{grade_titles[grade]} - 적수원가 계산 방식 비교", header_format)
+
+            ws.write(1, 0, "경락가(원/kg)", fmt_header)
+            ws.write(1, 1, df['경락가(원/kg)'].iloc[0], fmt_number)
+            ws.write(1, 2, "냉도체중(kg)", fmt_header)
+            ws.write(1, 3, df['냉도체중(kg)'].iloc[0], fmt_decimal)
+            ws.write(1, 4, "부대비용(원)", fmt_header)
+            ws.write(1, 5, df['부대비용(원)'].iloc[0], fmt_number)
+
+            virtual_total = df["시장가치(원)"].sum()
+            total_weight = df["중량(kg)"].sum()
+            ws.write(2, 0, "시장가치총액(원)", fmt_header)
+            ws.write(2, 1, virtual_total, fmt_number)
+            ws.write(2, 2, "총원가(원)", fmt_header)
+            ws.write(2, 3, df['총원가(원)'].iloc[0], fmt_number)
+            ws.write(2, 4, "부위합계(kg)", fmt_header)
+            ws.write(2, 5, total_weight, fmt_decimal)
+
+            ws.merge_range(4, 0, 5, 0, "부위", fmt_header)
+            ws.merge_range(4, 1, 5, 1, "중량(kg)", fmt_header)
+            ws.merge_range(4, 2, 5, 2, "시장가격(원/kg)", fmt_header)
+
+            fmt_original_header = wb.add_format({'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#ffeaa7'})
+            ws.merge_range(4, 3, 4, 8, "경락가 기반 (원가 그대로)", fmt_original_header)
+
+            fmt_new_header = wb.add_format({'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#a8e6cf'})
+            ws.merge_range(4, 9, 4, 13, "금천미트 10% 할증", fmt_new_header)
+
+            fmt_diff_header = wb.add_format({'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#ffb3ba'})
+            ws.merge_range(4, 14, 4, 15, "차이 분석", fmt_diff_header)
+
+            headers = ["적수원가", "현재마진율", "10%마진", "20%마진", "30%마진", "40%마진",
+                      "적수원가", "현재마진율", "10%마진", "20%마진", "30%마진", "40%마진",
+                      "원가차이", "차이율(%)"]
+            for j, header in enumerate(headers, start=3):
+                ws.write(5, j, header, fmt_header)
+
+            for i, (_, row) in enumerate(df.iterrows(), start=6):
+                ws.write(i, 0, row['부위'], fmt_text)
+                ws.write(i, 1, float(row['중량(kg)']), fmt_decimal)
+                ws.write(i, 2, float(row['시장가격(원/kg)']), fmt_number)
+
+                ws.write(i, 3, float(row['경락가_적수원가(원/kg)']), fmt_original)
+                ws.write(i, 4, float(row['경락가_현재마진율(%)']), fmt_percent)
+                ws.write(i, 5, int(row['경락가_10%마진']), fmt_original)
+                ws.write(i, 6, int(row['경락가_20%마진']), fmt_original)
+                ws.write(i, 7, int(row['경락가_30%마진']), fmt_original)
+                ws.write(i, 8, int(row['경락가_40%마진']), fmt_original)
+
+                ws.write(i, 9, float(row['금천10%_적수원가(원/kg)']), fmt_new)
+                ws.write(i, 10, float(row['금천10%_현재마진율(%)']), fmt_percent)
+                ws.write(i, 11, int(row['금천10%_10%마진']), fmt_new)
+                ws.write(i, 12, int(row['금천10%_20%마진']), fmt_new)
+                ws.write(i, 13, int(row['금천10%_30%마진']), fmt_new)
+
+                diff_fmt = fmt_diff_pos if row['적수원가_차이(원/kg)'] > 0 else fmt_diff_neg
+                ws.write(i, 14, float(row['적수원가_차이(원/kg)']), diff_fmt)
+                ws.write(i, 15, float(row['적수원가_차이율(%)']), diff_fmt)
+
+                today = datetime.now().strftime('%Y-%m-%d')
+                part = row['부위']
+
+                all_data_rows.append({
+                    'date': today, 'source': '경락가기준(적수비방식)', 'type': '적수원가',
+                    'Species': '돼지', 'Part': part, 'Grade': grade,
+                    'Price': int(row['경락가_적수원가(원/kg)']), 'Price_Per_Kg': f"{int(row['경락가_적수원가(원/kg)']):,}원"
+                })
+                for margin in [10, 20, 30, 40]:
+                    all_data_rows.append({
+                        'date': today, 'source': '경락가기준(적수비방식)', 'type': f'{margin}%마진',
+                        'Species': '돼지', 'Part': part, 'Grade': grade,
+                        'Price': int(row[f'경락가_{margin}%마진']), 'Price_Per_Kg': f"{int(row[f'경락가_{margin}%마진']):,}원"
+                    })
+
+                all_data_rows.append({
+                    'date': today, 'source': '금천미트(10%마진가정)', 'type': '적수원가',
+                    'Species': '돼지', 'Part': part, 'Grade': grade,
+                    'Price': int(row['금천10%_적수원가(원/kg)']), 'Price_Per_Kg': f"{int(row['금천10%_적수원가(원/kg)']):,}원"
+                })
+                for margin in [10, 20, 30, 40]:
+                    all_data_rows.append({
+                        'date': today, 'source': '금천미트(10%마진가정)', 'type': f'{margin}%마진',
+                        'Species': '돼지', 'Part': part, 'Grade': grade,
+                        'Price': int(row[f'금천10%_{margin}%마진']), 'Price_Per_Kg': f"{int(row[f'금천10%_{margin}%마진']):,}원"
+                    })
+
+            ws.set_column(0, 0, 12)
+            ws.set_column(1, 1, 10)
+            ws.set_column(2, 15, 11)
+            ws.freeze_panes(6, 1)
+
+        if all_data_rows:
+            ws_all = wb.add_worksheet('All_Data')
+            headers_all = ['date', 'source', 'type', 'Species', 'Part', 'Grade', 'Price', 'Price_Per_Kg']
+            for col, header in enumerate(headers_all):
+                ws_all.write(0, col, header, fmt_header)
+            for row_idx, data in enumerate(all_data_rows, start=1):
+                ws_all.write(row_idx, 0, data['date'], fmt_text)
+                ws_all.write(row_idx, 1, data['source'], fmt_text)
+                ws_all.write(row_idx, 2, data['type'], fmt_text)
+                ws_all.write(row_idx, 3, data['Species'], fmt_text)
+                ws_all.write(row_idx, 4, data['Part'], fmt_text)
+                ws_all.write(row_idx, 5, data['Grade'], fmt_text)
+                ws_all.write(row_idx, 6, data['Price'], fmt_number)
+                ws_all.write(row_idx, 7, data['Price_Per_Kg'], fmt_text)
+            ws_all.set_column(0, 0, 12)
+            ws_all.set_column(1, 1, 20)
+            ws_all.set_column(2, 2, 12)
+            ws_all.set_column(3, 3, 10)
+            ws_all.set_column(4, 4, 12)
+            ws_all.set_column(5, 5, 8)
+            ws_all.set_column(6, 6, 12)
+            ws_all.set_column(7, 7, 15)
+            ws_all.freeze_panes(1, 0)
+
+        wb.close()
+        print(f"Excel 결과 저장: {filename}")
+
+        all_data_filename = None
+        if all_data_rows:
+            all_data_filename = filename.replace('pivot', 'all_data')
+            self.export_all_data(all_data_rows, all_data_filename)
+
+        return filename, all_data_filename
+
+    def export_all_data(self, all_data_rows, filename):
+        """All_Data를 별도 Excel 파일로 저장"""
+        wb = xlsxwriter.Workbook(filename)
+        ws = wb.add_worksheet('All_Data')
+
+        fmt_header = wb.add_format({'bold': True, 'align': 'center', 'border': 1, 'bg_color': '#fbfcfe'})
+        fmt_text = wb.add_format({'border': 1})
+        fmt_number = wb.add_format({'border': 1, 'num_format': '#,##0'})
+
+        headers_all = ['date', 'source', 'type', 'Species', 'Part', 'Grade', 'Price', 'Price_Per_Kg']
+        for col, header in enumerate(headers_all):
+            ws.write(0, col, header, fmt_header)
+
+        for row_idx, data in enumerate(all_data_rows, start=1):
+            ws.write(row_idx, 0, data['date'], fmt_text)
+            ws.write(row_idx, 1, data['source'], fmt_text)
+            ws.write(row_idx, 2, data['type'], fmt_text)
+            ws.write(row_idx, 3, data['Species'], fmt_text)
+            ws.write(row_idx, 4, data['Part'], fmt_text)
+            ws.write(row_idx, 5, data['Grade'], fmt_text)
+            ws.write(row_idx, 6, data['Price'], fmt_number)
+            ws.write(row_idx, 7, data['Price_Per_Kg'], fmt_text)
+
+        ws.set_column(0, 0, 12)
+        ws.set_column(1, 1, 20)
+        ws.set_column(2, 2, 12)
+        ws.set_column(3, 3, 10)
+        ws.set_column(4, 4, 12)
+        ws.set_column(5, 5, 8)
+        ws.set_column(6, 6, 12)
+        ws.set_column(7, 7, 15)
+        ws.freeze_panes(1, 0)
+
+        wb.close()
+        print(f"All_Data Excel 저장: {filename}")
+        return filename
+
+
+# ============================================================
+# 구글 드라이브 업로드 함수 (OAuth 방식)
+# ============================================================
+
 def upload_to_google_drive(file_path):
-    """생성된 파일을 구글 드라이브에 업로드 (OAuth 방식)"""
+    """생성된 파일을 구글 드라이브에 업로드 (OAuth 방식, 원본 파일명 유지)"""
     try:
         token_json = os.environ.get('GDRIVE_TOKEN')
         folder_id = os.environ.get('GDRIVE_FOLDER_ID')
@@ -574,19 +1176,18 @@ def upload_to_google_drive(file_path):
 
         service = build('drive', 'v3', credentials=creds)
 
-        display_name = f"돼지가격_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
-        file_metadata = {'name': display_name, 'parents': [folder_id]}
+        file_metadata = {'name': os.path.basename(file_path), 'parents': [folder_id]}
         media = MediaFileUpload(file_path, resumable=True)
 
-        print(f"구글 드라이브 업로드 중: {display_name}")
+        print(f"구글 드라이브 업로드 중: {os.path.basename(file_path)}")
         result = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
-        print(f"업로드 완료! (파일ID: {result.get('id')})")
+        print(f"업로드 완료: {os.path.basename(file_path)} (ID: {result.get('id')})")
     except Exception as e:
-        print(f"업로드 실패: {e}")
+        print(f"업로드 실패: {os.path.basename(file_path)} - {e}")
 
 
 async def main():
-    print("=== 돼지 도매가 + 경락가 스크래핑 프로그램 ===")
+    print("=== 돼지 가격 수집 + 마진 계산 통합 프로그램 ===")
     service_key = os.getenv('EKAPE_API_KEY')
     if not service_key:
         try:
@@ -595,27 +1196,53 @@ async def main():
         except FileNotFoundError: pass
     if not service_key:
         service_key = "LFq9u3tNGZKe+rUDioG7t8YJ6kLegDAwuy6sKuZAEHWUQ2RnPHUdh70zsjagYIdCWLKvoyxP4My/320pPvCatw=="
-    
+
+    # ── 1단계: 가격 데이터 수집 ──
+    print("\n[1단계] 가격 데이터 수집 중...")
     scraper = PorkCompleteScraper(service_key=service_key)
-    print("\n1. 도체 경락가 수집 중...")
     auction_success = scraper.collect_auction_data()
-    print("\n2. 도매가 수집 중...")
     market_success = await scraper.collect_pork_data()
-    
-    # ★ 추가 3/3: 파일명 변수화 + 업로드 호출
-    excel_filename = f"pork_wholesale_prices_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-    
-    if auction_success or market_success:
-        scraper.print_summary()
-        excel_success = scraper.save_excel(excel_filename)
-        if excel_success:
-            upload_to_google_drive(excel_filename)
-            print("\n모든 작업이 성공적으로 완료되었습니다!")
-        else:
-            print("\nExcel 저장에 실패했습니다.")
-    else:
+
+    if not (auction_success or market_success):
         print("\n데이터 수집에 실패했습니다.")
-    
+        if scraper.errors:
+            print(f"\n발생한 오류: {len(scraper.errors)}건")
+            for error in scraper.errors[-3:]:
+                print(f"  [{error['timestamp']}] {error['section']}: {error['error']}")
+        return
+
+    scraper.print_summary()
+
+    price_filename = f"pork_wholesale_prices_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+    if not scraper.save_excel(price_filename):
+        print("\n가격 파일 저장에 실패했습니다.")
+        return
+
+    # ── 2단계: 적수원가/마진 계산 (돼지는 등급 구분 없이 단일 그룹으로 계산) ──
+    print("\n[2단계] 적수원가/마진 계산 중...")
+    calculator = PorkMarginCalculatorCompare(price_filename)
+
+    html_file = excel_file = all_data_file = None
+    if calculator.load_data() and calculator.prepare_data() and calculator.generate_results():
+        html_file = calculator.export_html()
+        excel_file, all_data_file = calculator.export_excel()
+    else:
+        print("마진 계산에 실패했습니다. 가격 데이터만 업로드합니다.")
+
+    # ── 3단계: 구글 드라이브 업로드 ──
+    for f in [price_filename, html_file, excel_file, all_data_file]:
+        if f:
+            upload_to_google_drive(f)
+
+    print(f"\n=== 모든 작업 완료 ===")
+    print(f"가격 데이터: {price_filename}")
+    if html_file:
+        print(f"HTML: {html_file}")
+    if excel_file:
+        print(f"Excel (비교): {excel_file}")
+    if all_data_file:
+        print(f"Excel (All Data): {all_data_file}")
+
     if scraper.errors:
         print(f"\n발생한 오류: {len(scraper.errors)}건")
         for error in scraper.errors[-3:]:
