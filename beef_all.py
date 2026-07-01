@@ -460,11 +460,17 @@ class BeefCompleteScraper:
                             print(f"    [{grade} 등급 {j}/{len(grades)}] 수집 중...")
                             try:
                                 # 1. 등급 필터 먼저 클릭
+                                # 버튼 안에 숨은 '품절' 배지(<span class="soldout-badge">)가 있어도
+                                # textContent에 항상 포함되므로, 버튼 직속 텍스트 노드만 비교한다
                                 grade_clicked = await page.evaluate(f"""
                                     (grade) => {{
                                         const buttons = document.querySelectorAll('button');
                                         for (let btn of buttons) {{
-                                            if (btn.textContent && btn.textContent.trim() === grade) {{
+                                            const directText = Array.from(btn.childNodes)
+                                                .filter(n => n.nodeType === Node.TEXT_NODE)
+                                                .map(n => n.textContent.trim())
+                                                .join('');
+                                            if (directText === grade) {{
                                                 btn.click();
                                                 return true;
                                             }}
@@ -660,11 +666,17 @@ class BeefCompleteScraper:
 
                     # 1등급만 선택
                     grade = "1"
+                    # 버튼 안에 숨은 '품절' 배지(<span class="soldout-badge">)가 있어도
+                    # textContent에 항상 포함되므로, 버튼 직속 텍스트 노드만 비교한다
                     grade_clicked = await page.evaluate(f"""
                         (grade) => {{
                             const buttons = document.querySelectorAll('button');
                             for (let btn of buttons) {{
-                                if (btn.textContent && btn.textContent.trim() === grade) {{
+                                const directText = Array.from(btn.childNodes)
+                                    .filter(n => n.nodeType === Node.TEXT_NODE)
+                                    .map(n => n.textContent.trim())
+                                    .join('');
+                                if (directText === grade) {{
                                     btn.click();
                                     return true;
                                 }}
