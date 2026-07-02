@@ -961,7 +961,11 @@ class BeefCompleteScraper:
                         prices[hg] = None
                         changed = True
 
-            # Step 2: 유효 가격 기반 기하평균 배율 산출 후 추정
+            # Step 2: 등급별 추정
+            # - 두 유효가격 "사이"에 낀 등급은 그 두 값의 기하평균(중앙값)으로 직접 보간한다.
+            #   (양쪽 실측값을 그대로 쓰므로 클리핑 없이도 항상 두 값 사이에 위치 → 역전 불가능)
+            # - 유효가격 범위 "밖"의 등급(예: 1+만 있고 1++가 없는 경우)만 평균 배율로 외삽하며,
+            #   이때만 비정상적인 배율을 막기 위해 RATIO_MIN~RATIO_MAX로 클리핑한다.
             DEFAULT_RATIO = 1.15  # 유효 가격 1개뿐일 때 사용하는 기본 배율 (15%/단계)
             RATIO_MIN = 1.05      # 단계당 최소 5% 프리미엄
             RATIO_MAX = 1.30      # 단계당 최대 30% 프리미엄
@@ -982,33 +986,54 @@ class BeefCompleteScraper:
                     ratios.append(ratio_per_step)
 
             if ratios:
-                # 기하평균: (r1 × r2 × ... × rn)^(1/n)
+                # 기하평균: (r1 × r2 × ... × rn)^(1/n) - 범위 밖 외삽에만 사용
                 product = 1.0
                 for r in ratios:
                     product *= r
                 raw_ratio = product ** (1.0 / len(ratios))
                 avg_ratio = max(RATIO_MIN, min(RATIO_MAX, raw_ratio))
                 if avg_ratio != raw_ratio:
-                    print(f"  [배율 클리핑] {part}: {raw_ratio:.3f} → {avg_ratio:.3f} (범위 {RATIO_MIN}~{RATIO_MAX})")
+                    print(f"  [배율 클리핑] {part}: {raw_ratio:.3f} → {avg_ratio:.3f} (범위 {RATIO_MIN}~{RATIO_MAX}, 외삽시에만 적용)")
             else:
                 avg_ratio = DEFAULT_RATIO
 
-            # 앵커: 최저 유효등급 (인덱스 가장 높은 쪽 = 가장 낮은 등급)
-            anchor_idx, anchor_price = valid_points[-1]
-
             valid_grades_str = ', '.join(grade_order[i] for i, _ in valid_points)
             if ratios:
-                print(f"  [배율] {part}: {avg_ratio:.3f}배/단계 ({(avg_ratio-1)*100:.1f}%, 유효등급: {valid_grades_str})")
+                print(f"  [배율] {part}: 외삽용 {avg_ratio:.3f}배/단계 ({(avg_ratio-1)*100:.1f}%, 유효등급: {valid_grades_str})")
             else:
                 print(f"  [배율] {part}: 기본값 {DEFAULT_RATIO} 적용 (유효등급 1개: {valid_grades_str})")
 
             for i, grade in enumerate(grade_order):
                 if prices[grade] is not None:
                     continue
-                steps = anchor_idx - i  # 양수 = 앵커보다 상위 등급
-                estimated = int(anchor_price * (avg_ratio ** steps))
+
+                # 현재 등급을 감싸는 상/하위 유효가격(브래킷) 탐색
+                hi_bracket = max((vp for vp in valid_points if vp[0] < i), key=lambda vp: vp[0], default=None)
+                lo_bracket = min((vp for vp in valid_points if vp[0] > i), key=lambda vp: vp[0], default=None)
+
+                if hi_bracket and lo_bracket:
+                    # 두 실측값 "사이" 보간 → 실측값 그대로 기하평균 적용 (클리핑 없음, 역전 불가)
+                    hi_idx, hi_price = hi_bracket
+                    lo_idx, lo_price = lo_bracket
+                    steps_between = lo_idx - hi_idx
+                    ratio = (hi_price / lo_price) ** (1.0 / steps_between)
+                    estimated = int(hi_price / (ratio ** (i - hi_idx)))
+                    basis = f"보간:{grade_order[hi_idx]} {hi_price:,}원 ~ {grade_order[lo_idx]} {lo_price:,}원"
+                elif lo_bracket:
+                    # 최상위쪽 범위 밖 외삽 (예: 1++ 가격 부재) → 평균 배율 사용
+                    lo_idx, lo_price = lo_bracket
+                    steps = lo_idx - i
+                    estimated = int(lo_price * (avg_ratio ** steps))
+                    basis = f"외삽:{grade_order[lo_idx]} {lo_price:,}원 × {avg_ratio:.3f}^{steps}"
+                else:
+                    # 최하위쪽 범위 밖 외삽 (이론상 2등급은 항상 최하위이므로 거의 발생하지 않음)
+                    hi_idx, hi_price = hi_bracket
+                    steps = i - hi_idx
+                    estimated = int(hi_price / (avg_ratio ** steps))
+                    basis = f"외삽:{grade_order[hi_idx]} {hi_price:,}원 ÷ {avg_ratio:.3f}^{steps}"
+
                 note = '교란가격→추정' if grade in grade_items else '가격부재→추정'
-                print(f"  [추정] {part} - {grade}: {estimated:,}원/kg (기준:{grade_order[anchor_idx]} {anchor_price:,}원 × {avg_ratio:.3f}^{steps})")
+                print(f"  [추정] {part} - {grade}: {estimated:,}원/kg ({basis})")
                 corrections_log.append(f"{part}/{grade}: {estimated:,}원 ({note})")
                 prices[grade] = estimated
 
