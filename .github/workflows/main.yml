@@ -27,6 +27,7 @@ jobs:
         run: playwright install --with-deps firefox
 
       - name: 돼지 가격 수집
+        id: pork
         env:
           EKAPE_API_KEY: ${{ secrets.EKAPE_API_KEY }}
           GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
@@ -34,8 +35,22 @@ jobs:
         run: python pork.py
 
       - name: 한우 가격 수집 + 마진 계산
+        id: beef
         env:
           EKAPE_API_KEY: ${{ secrets.EKAPE_API_KEY }}
           GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
         run: python beef_all.py
+
+      - name: 카카오톡 알림
+        if: always()
+        env:
+          KAKAO_REST_KEY: ${{ secrets.KAKAO_REST_KEY }}
+          KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
+          KAKAO_REFRESH_TOKEN: ${{ secrets.KAKAO_REFRESH_TOKEN }}
+          GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
+          PORK_OUTCOME: ${{ steps.pork.outcome }}
+          BEEF_OUTCOME: ${{ steps.beef.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: python kakao_notify.py
