@@ -1,7 +1,7 @@
 """
 카카오톡 '나에게 보내기' 알림
 - GitHub Actions 마지막 단계에서 실행됩니다.
-- 돼지/한우 결과 파일이 만들어졌는지, 드라이브에 올라갔는지 확인해서 카톡으로 보냅니다.
+- 돼지/한우 HTML 결과 2개를 구글 문서로 변환해 드라이브에 올리고, 그 링크를 카톡으로 보냅니다.
 - 카카오 refresh 토큰(2달짜리)이 갱신되면 구글 드라이브 폴더의 작은 파일에 저장해서
   다음 실행 때 자동으로 이어 씁니다. (그래서 2달마다 다시 받을 필요가 없어요)
 """
@@ -20,19 +20,6 @@ REST_KEY = os.environ.get("KAKAO_REST_KEY", "").strip()
 CLIENT_SECRET = os.environ.get("KAKAO_CLIENT_SECRET", "").strip()
 ENV_REFRESH = os.environ.get("KAKAO_REFRESH_TOKEN", "").strip()
 FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
-
-PORK_FILES = [
-    "pork_wholesale_prices_*.xlsx",
-    "pork_margin_pivot_*.html",
-    "pork_margin_pivot_*.xlsx",
-    "pork_margin_all_data_*.xlsx",
-]
-BEEF_FILES = [
-    "beef_price_*.xlsx",
-    "beef_margin_compare_*.html",
-    "beef_margin_compare_*.xlsx",
-    "beef_margin_all_data_*.xlsx",
-]
 
 
 # ------------------------------------------------------------
@@ -148,73 +135,61 @@ def get_access_token(svc):
 
 
 # ------------------------------------------------------------
-# 메시지 만들기
+# HTML 결과 2개 -> 구글 문서로 변환해서 링크 만들기
+# (카톡은 파일 첨부가 안 되고, 드라이브의 .html 은 코드로 보여서 문서로 변환합니다)
 # ------------------------------------------------------------
-def count_uploaded(svc, files):
-    if not svc:
-        return None
-    n = 0
-    for f in files:
-        try:
-            if drive_find(svc, os.path.basename(f)):
-                n += 1
-        except Exception:
-            return None
-    return n
+RESULTS = [
+    ("돼지", "PORK_OUTCOME", "pork_margin_pivot_*.html"),
+    ("한우", "BEEF_OUTCOME", "beef_margin_compare_*.html"),
+]
 
 
-def status_line(label, outcome, patterns, svc):
-    files = sorted({f for p in patterns for f in glob.glob(p)})
-    total = len(patterns)
-    if outcome == "skipped":
-        return f"{label}: 실행 안 됨 (앞 단계 오류)"
-    if outcome == "failure":
-        head = f"{label}: 실패 (오류로 중단)"
-    elif not files:
-        return f"{label}: 실패 (데이터 수집 안 됨)"
-    elif len(files) < total:
-        head = f"{label}: 일부 완료 ({len(files)}/{total}개)"
-    else:
-        head = f"{label}: 완료"
-    if not files:
-        return head
-    up = count_uploaded(svc, files)
-    if up is not None:
-        head += f" / 드라이브 {up}/{len(files)}"
-    return head
+def upload_html_as_doc(svc, html_path, title):
+    from googleapiclient.http import MediaFileUpload
+
+    meta = {"name": title, "mimeType": "application/vnd.google-apps.document"}
+    if FOLDER_ID:
+        meta["parents"] = [FOLDER_ID]
+    media = MediaFileUpload(html_path, mimetype="text/html", resumable=False)
+    f = svc.files().create(body=meta, media_body=media, fields="id,webViewLink").execute()
+    return f.get("webViewLink") or f"https://docs.google.com/document/d/{f['id']}/edit"
 
 
-def build_text(svc):
-    now = datetime.now(KST)
-    day = "월화수목금토일"[now.weekday()]
-    if os.environ.get("KAKAO_TEST"):
-        return (
-            f"[축산 가격 수집] 알림 테스트\n"
-            f"{now:%m/%d}({day}) {now:%H:%M}\n\n"
-            f"카톡 알림 연결이 정상이에요."
-        )
-    lines = [
-        f"[축산 가격 수집] {now:%m/%d}({day}) {now:%H:%M}",
-        "",
-        status_line("돼지", os.environ.get("PORK_OUTCOME", ""), PORK_FILES, svc),
-        status_line("한우", os.environ.get("BEEF_OUTCOME", ""), BEEF_FILES, svc),
-    ]
-    return "\n".join(lines)[:200]
+def collect_results(svc, now):
+    lines, buttons = [], []
+    for label, outcome_env, pattern in RESULTS:
+        outcome = os.environ.get(outcome_env, "")
+        files = sorted(glob.glob(pattern))
+        if not files:
+            if outcome == "skipped":
+                lines.append(f"{label}: 실행 안 됨")
+            else:
+                lines.append(f"{label}: 실패 (결과 없음)")
+            continue
+        link = None
+        if svc:
+            try:
+                link = upload_html_as_doc(svc, files[-1], f"{label} 결과 {now:%Y-%m-%d}")
+            except Exception as e:
+                print(f"[카톡] {label} 문서 변환 실패: {e}")
+        lines.append(f"{label}: 완료")
+        if link:
+            buttons.append({"title": f"{label} 결과 보기", "link": {"web_url": link, "mobile_web_url": link}})
+    return lines, buttons
 
 
-def send(access_token, text):
-    folder_url = (
+def send(access_token, text, buttons):
+    fallback = (
         f"https://drive.google.com/drive/folders/{FOLDER_ID}" if FOLDER_ID else "https://drive.google.com"
     )
-    run_url = os.environ.get("RUN_URL") or folder_url
+    if not buttons:
+        run_url = os.environ.get("RUN_URL") or fallback
+        buttons = [{"title": "실행 기록 보기", "link": {"web_url": run_url, "mobile_web_url": run_url}}]
     template = {
         "object_type": "text",
-        "text": text,
-        "link": {"web_url": folder_url, "mobile_web_url": folder_url},
-        "buttons": [
-            {"title": "드라이브 열기", "link": {"web_url": folder_url, "mobile_web_url": folder_url}},
-            {"title": "실행 기록", "link": {"web_url": run_url, "mobile_web_url": run_url}},
-        ],
+        "text": text[:200],
+        "link": buttons[0]["link"],
+        "buttons": buttons[:2],
     }
     res = post_form(
         "https://kapi.kakao.com/v2/api/talk/memo/default/send",
@@ -236,9 +211,17 @@ def main():
     if not token:
         print("[카톡] 토큰을 받지 못했습니다. refresh 토큰을 새로 발급해 주세요.")
         return
-    text = build_text(svc)
+
+    now = datetime.now(KST)
+    day = "월화수목금토일"[now.weekday()]
+    if os.environ.get("KAKAO_TEST"):
+        text = f"[축산 가격 수집] 알림 테스트\n{now:%m/%d}({day}) {now:%H:%M}\n\n카톡 알림 연결이 정상이에요."
+        buttons = []
+    else:
+        lines, buttons = collect_results(svc, now)
+        text = "\n".join([f"[축산 가격 수집] {now:%m/%d}({day})", ""] + lines)
     print(text)
-    send(token, text)
+    send(token, text, buttons)
 
 
 if __name__ == "__main__":
