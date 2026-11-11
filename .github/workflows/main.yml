@@ -7,15 +7,15 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.11'
 
@@ -28,22 +28,26 @@ jobs:
 
       - name: 돼지 가격 수집
         id: pork
+        timeout-minutes: 12
         env:
           EKAPE_API_KEY: ${{ secrets.EKAPE_API_KEY }}
           GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: python pork.py
+        run: python -u pork.py
 
       - name: 한우 가격 수집 + 마진 계산
         id: beef
+        if: always()
+        timeout-minutes: 15
         env:
           EKAPE_API_KEY: ${{ secrets.EKAPE_API_KEY }}
           GDRIVE_TOKEN: ${{ secrets.GDRIVE_TOKEN }}
           GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-        run: python beef_all.py
+        run: python -u beef_all.py
 
       - name: 카카오톡 알림
         if: always()
+        timeout-minutes: 5
         env:
           KAKAO_REST_KEY: ${{ secrets.KAKAO_REST_KEY }}
           KAKAO_CLIENT_SECRET: ${{ secrets.KAKAO_CLIENT_SECRET }}
