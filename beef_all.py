@@ -116,7 +116,7 @@ class BeefCompleteScraper:
             }
 
             try:
-                response = self.session.get(url, params=params, timeout=(5, 10))
+                response = self.session.get(url, params=params, timeout=30)
                 response.raise_for_status()
 
                 root = ET.fromstring(response.text)
@@ -184,11 +184,8 @@ class BeefCompleteScraper:
 
                 print(f"한우 도체 경락가 {try_date_str}: 데이터 없음, 이전 날짜 시도...")
 
-            except requests.exceptions.RequestException as e:
-                self.log_error("한우경락가API", f"연결 실패 ({type(e).__name__}); 날짜 재시도를 중단하고 부분육 수집을 계속합니다")
-                return False
             except Exception as e:
-                print(f"한우 도체 경락가 {try_date_str} 오류: {type(e).__name__}")
+                print(f"한우 도체 경락가 {try_date_str} 오류: {str(e)}")
                 continue
 
         self.log_error("한우경락가API", "30일간 경락가 데이터를 찾을 수 없음")
