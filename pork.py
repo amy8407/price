@@ -105,7 +105,7 @@ class PorkCompleteScraper:
                 try:
                     print(f"    돼지 경락가 API 시도: {api['name']} ({try_date_str})")
                     params = api['params_func'](date_api)
-                    response = self.session.get(api['url'], params=params, timeout=(5, 10))
+                    response = self.session.get(api['url'], params=params, timeout=30)
                     response.raise_for_status()
                     root = ET.fromstring(response.text)
                     result_code = root.find('.//resultCode')
@@ -206,11 +206,8 @@ class PorkCompleteScraper:
                                 return True
                     
                     print(f"    돼지 경락가 API {api['name']} {try_date_str}: 데이터 없음")
-                except requests.exceptions.RequestException as e:
-                    self.log_error("돼지경락가API", f"연결 실패 ({type(e).__name__}); 날짜 재시도를 중단합니다")
-                    return False
                 except Exception as e:
-                    print(f"    돼지 경락가 API {api['name']} {try_date_str} 오류: {type(e).__name__}")
+                    print(f"    돼지 경락가 API {api['name']} {try_date_str} 오류: {str(e)}")
                     continue
             
             print(f"돼지 경락가 {try_date_str}: 모든 API 실패, 이전 날짜 시도...")
@@ -264,7 +261,7 @@ class PorkCompleteScraper:
             url = "http://data.ekape.or.kr/openapi-data/service/user/grade/auct/pigJejuGrade"
             params = {'ServiceKey': self.service_key, 'delngDe': date_api}
             try:
-                response = self.session.get(url, params=params, timeout=(5, 10))
+                response = self.session.get(url, params=params, timeout=30)
                 response.raise_for_status()
                 root = ET.fromstring(response.text)
                 result_code = root.find('.//resultCode')
@@ -287,11 +284,8 @@ class PorkCompleteScraper:
                         print(f"돼지 공식도매가 API 수집 성공: {try_date_str} ({len(items)}건)")
                         return True
                 print(f"돼지 공식도매가 API {try_date_str}: 데이터 없음, 이전 날짜 시도...")
-            except requests.exceptions.RequestException as e:
-                print(f"돼지 공식도매가 API 연결 실패 ({type(e).__name__}); 웹 시장가 수집을 계속합니다")
-                return False
             except Exception as e:
-                print(f"돼지 공식도매가 API {try_date_str} 오류: {type(e).__name__}")
+                print(f"돼지 공식도매가 API {try_date_str} 오류: {str(e)}")
                 continue
         print("돼지 공식도매가 API: 8일간 데이터를 찾을 수 없음")
         return False
